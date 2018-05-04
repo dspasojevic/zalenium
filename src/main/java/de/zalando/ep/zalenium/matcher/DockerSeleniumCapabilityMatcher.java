@@ -27,9 +27,6 @@ public class DockerSeleniumCapabilityMatcher extends DefaultCapabilityMatcher {
             ZaleniumCapabilityType.RECORD_VIDEO_NO_PREFIX,
             ZaleniumCapabilityType.TIME_ZONE_NO_PREFIX);
 
-    private static String chromeVersion = null;
-    private static String firefoxVersion = null;
-    private static AtomicBoolean browserVersionsFetched = new AtomicBoolean(false);
     private final Logger logger = LoggerFactory.getLogger(DockerSeleniumCapabilityMatcher.class.getName());
     private DefaultRemoteProxy proxy;
 
@@ -51,8 +48,6 @@ public class DockerSeleniumCapabilityMatcher extends DefaultCapabilityMatcher {
 
         // DockerSeleniumRemoteProxy part
         if (super.matches(nodeCapability, requestedCapability)) {
-            getChromeAndFirefoxVersions(proxy);
-
             // Prefix Zalenium custom capabilities here (both node and requested)
             prefixZaleniumCustomCapabilities(nodeCapability);
             prefixZaleniumCustomCapabilities(requestedCapability);
@@ -81,20 +76,6 @@ public class DockerSeleniumCapabilityMatcher extends DefaultCapabilityMatcher {
             copiedMap.put(entry.getKey(), entry.getValue());
         }
         return copiedMap;
-    }
-
-    private void getChromeAndFirefoxVersions(DefaultRemoteProxy proxy) {
-        if (!browserVersionsFetched.getAndSet(true)) {
-            for (TestSlot testSlot : proxy.getTestSlots()) {
-                String browser = testSlot.getCapabilities().get(CapabilityType.BROWSER_NAME).toString();
-                String browserVersion = testSlot.getCapabilities().get(CapabilityType.VERSION).toString();
-                if (BrowserType.CHROME.equalsIgnoreCase(browser)) {
-                    chromeVersion = browserVersion;
-                } else if (BrowserType.FIREFOX.equalsIgnoreCase(browser)) {
-                    firefoxVersion = browserVersion;
-                }
-            }
-        }
     }
 
     private boolean isScreenResolutionMatching(Map<String, Object> nodeCapability, Map<String, Object> requestedCapability) {

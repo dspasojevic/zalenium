@@ -180,6 +180,7 @@ public class AutoStartProxySetTest {
     private static DockerSeleniumRemoteProxy proxy(String containerId, boolean isBusy) {
         DockerSeleniumRemoteProxy remoteProxy = Mockito.mock(DockerSeleniumRemoteProxy.class);
         Mockito.when(remoteProxy.getContainerId()).thenReturn(containerId);
+        Mockito.when(remoteProxy.hasCapability(Mockito.any())).thenReturn(true);
         if (isBusy) {
             Mockito.when(remoteProxy.getNewSession(Mockito.any())).thenReturn(null);
         } else {

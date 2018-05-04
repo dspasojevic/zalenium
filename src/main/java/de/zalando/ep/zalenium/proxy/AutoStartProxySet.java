@@ -14,6 +14,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -21,6 +23,11 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.openqa.grid.internal.ProxySet;
 import org.openqa.grid.internal.RemoteProxy;
 import org.openqa.grid.internal.TestSession;
+import org.openqa.grid.internal.TestSlot;
+import org.openqa.grid.selenium.proxy.DefaultRemoteProxy;
+import org.openqa.selenium.Proxy;
+import org.openqa.selenium.remote.BrowserType;
+import org.openqa.selenium.remote.CapabilityType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -77,6 +84,14 @@ public class AutoStartProxySet extends ProxySet implements Iterable<RemoteProxy>
 
     private final SessionRequestFilter filter = new SessionRequestFilter();
 
+    private final ProxySet autoStartedProxies;
+
+    private final ProxySet manuallyRegisteredProxies;
+
+    private String chromeVersion = null;
+    private String firefoxVersion = null;
+    private AtomicBoolean browserVersionsFetched = new AtomicBoolean(false);
+
     private final long minContainers;
     private final long maxContainers;
     private final long timeToWaitToStart;
@@ -91,6 +106,7 @@ public class AutoStartProxySet extends ProxySet implements Iterable<RemoteProxy>
     public AutoStartProxySet(boolean throwOnCapabilityNotPresent, long minContainers, long maxContainers,
             long timeToWaitToStart, boolean waitForAvailableNodes, DockeredSeleniumStarter starter, Clock clock) {
         super(throwOnCapabilityNotPresent);
+
         this.minContainers = minContainers;
         this.maxContainers = maxContainers;
         this.timeToWaitToStart = timeToWaitToStart;
@@ -98,6 +114,9 @@ public class AutoStartProxySet extends ProxySet implements Iterable<RemoteProxy>
         this.starter = starter;
         this.clock = clock;
 
+        this.autoStartedProxies = new ProxySet(throwOnCapabilityNotPresent);
+        this.manuallyRegisteredProxies = new ProxySet(throwOnCapabilityNotPresent);
+        
         poller = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -137,6 +156,8 @@ public class AutoStartProxySet extends ProxySet implements Iterable<RemoteProxy>
     public void teardown() {
         poller.interrupt();
         super.teardown();
+        this.autoStartedProxies.teardown();
+        this.manuallyRegisteredProxies.teardown();
     }
 
     /**
@@ -149,6 +170,8 @@ public class AutoStartProxySet extends ProxySet implements Iterable<RemoteProxy>
         int busy = super.getBusyProxies().size();
         int total = super.size();
 
+        LOGGER.debug(String.format("[%d] of [%d] proxies are busy.", busy, total));
+
         List<RemoteProxy> proxies = super.getSorted();
         proxies.stream().forEach(proxy -> {
             String id = proxy.getId();
@@ -156,28 +179,75 @@ public class AutoStartProxySet extends ProxySet implements Iterable<RemoteProxy>
             LOGGER.debug(String.format("[%s] [%s] has capability ? [%s].", id, proxy.getClass(), hasCapability));
         });
 
-        LOGGER.debug(String.format("[%d] of [%d] proxies are busy.", busy, total));
-
-        TestSession newSession = super.getNewSession(desiredCapabilities);
-        if (newSession == null) {
+        LOGGER.debug("[{}] of [{}] auto proxies are busy.", this.autoStartedProxies.getBusyProxies().size(), this.autoStartedProxies.size());
+        TestSession newSession = this.autoStartedProxies.getNewSession(desiredCapabilities);
+        if (newSession == null && couldAutoStart(desiredCapabilities)) {
             this.start(desiredCapabilities);
         }
+        else if (newSession == null) {
+            // See if the manually registered proxies can satisfy.
+            LOGGER.debug("[{}] of [{}] manual proxies are busy.", this.manuallyRegisteredProxies.getBusyProxies().size(), this.manuallyRegisteredProxies.size());
+            newSession = this.manuallyRegisteredProxies.getNewSession(desiredCapabilities);
+        }
+
         return newSession;
     }
 
+    public boolean couldAutoStart(Map<String, Object> desiredCapabilities) {
+        // FIXME - how should this be implemented using the (possibly) known autostart firefox and chrome versions?
+        return true;
+    }
+
+    @Override
+    public void setThrowOnCapabilityNotPresent(boolean throwOnCapabilityNotPresent) {
+        super.setThrowOnCapabilityNotPresent(throwOnCapabilityNotPresent);
+        this.autoStartedProxies.setThrowOnCapabilityNotPresent(throwOnCapabilityNotPresent);
+        this.manuallyRegisteredProxies.setThrowOnCapabilityNotPresent(throwOnCapabilityNotPresent);
+    }
+
+    @Override
+    public void verifyAbilityToHandleDesiredCapabilities(Map<String, Object> desiredCapabilities) {
+        try {
+            if (this.autoStartedProxies.isEmpty()) {
+                // FIXME - guess whether auto-starting a proxy *could* satisfy the requirements.
+                if (this.browserVersionsFetched.get()) {
+                    if (couldAutoStart(desiredCapabilities)) {
+                        return;
+                    }
+                    else {
+                        this.manuallyRegisteredProxies.verifyAbilityToHandleDesiredCapabilities(desiredCapabilities);
+                    }
+                }
+                else {
+                    this.manuallyRegisteredProxies.verifyAbilityToHandleDesiredCapabilities(desiredCapabilities);
+                }
+            }
+            else {
+                this.autoStartedProxies.verifyAbilityToHandleDesiredCapabilities(desiredCapabilities);
+            }
+        }
+        catch (Exception e) {
+            this.manuallyRegisteredProxies.verifyAbilityToHandleDesiredCapabilities(desiredCapabilities);
+        }
+    }
+
     public void add(RemoteProxy proxy) {
-        boolean shouldAdd = true;
         if (proxy instanceof DockerSeleniumRemoteProxy) {
             DockerSeleniumRemoteProxy dockerSeleniumRemoteProxy = (DockerSeleniumRemoteProxy) proxy;
-            shouldAdd = this.register(dockerSeleniumRemoteProxy);
-        }
-
-        if (shouldAdd) {
-            super.add(proxy);
+            boolean shouldAdd = this.register(dockerSeleniumRemoteProxy);
+            if (shouldAdd) {
+                super.add(proxy);
+                this.autoStartedProxies.add(dockerSeleniumRemoteProxy);
+                getChromeAndFirefoxVersions(dockerSeleniumRemoteProxy);
+            }
+            else {
+                // Won't be tracking the proxy, so it won't be removed and shutdown later - tear down.
+                proxy.teardown();
+            }
         }
         else {
-            // Won't be tracking the proxy, so it won't be removed and shutdown later - tear down.
-            proxy.teardown();
+            super.add(proxy);
+            this.manuallyRegisteredProxies.add(proxy);
         }
     }
 
@@ -193,10 +263,30 @@ public class AutoStartProxySet extends ProxySet implements Iterable<RemoteProxy>
             } catch (Exception e) {
                 LOGGER.error("Failed to stop container [" + containerId + "].", e);
             }
+
+            this.autoStartedProxies.remove(dockerSeleniumRemoteProxy);
+        }
+        else {
+            this.manuallyRegisteredProxies.remove(proxy);
         }
         return super.remove(proxy);
     }
 
+    private void getChromeAndFirefoxVersions(DockerSeleniumRemoteProxy proxy) {
+        if (!browserVersionsFetched.getAndSet(true)) {
+            for (TestSlot testSlot : proxy.getTestSlots()) {
+                String browser = testSlot.getCapabilities().get(CapabilityType.BROWSER_NAME).toString();
+                String browserVersion = testSlot.getCapabilities().get(CapabilityType.VERSION).toString();
+                if (BrowserType.CHROME.equalsIgnoreCase(browser)) {
+                    chromeVersion = browserVersion;
+                } else if (BrowserType.FIREFOX.equalsIgnoreCase(browser)) {
+                    firefoxVersion = browserVersion;
+                }
+            }
+        }
+    }
+
+    
     /**
      * If possible, starts a new proxy that can satisfy the requested capabilities.
      * 
@@ -300,6 +390,7 @@ public class AutoStartProxySet extends ProxySet implements Iterable<RemoteProxy>
                 proxy.markDown();
                 if (contains(proxy)) {
                     super.remove(proxy);
+                    autoStartedProxies.remove(proxy);
                 }
             });
         }
